@@ -521,6 +521,8 @@ function resetViewerUI(message = "Enter the broadcaster's code to begin.") {
   $('#viewerLeave').hidden = true;
   $('#enableSound').hidden = true;
   $('#viewerFullscreen').hidden = true;
+  $('#motionBox').hidden = true;
+  stopMotion({ quiet: true });
   $('#codeIn').value = '';
   $('#viewerConnect').textContent = 'Join stream';
   $('#viewerConnect').disabled = false;
@@ -683,6 +685,9 @@ async function viewerConnect() {
     button.textContent = 'Start over';
     button.disabled = false;
 
+    MOTION.alerts = 0;
+    MOTION.lastAlert = 0;
+
     setBadge($('#viewerBadge'), 'waiting', 'busy');
     setStatus($('#viewerStatus'), 'Waiting for the broadcaster to accept you…', 'ok');
   } catch (err) {
@@ -709,6 +714,8 @@ function onViewerConnectionState() {
       $('#viewerCodes').hidden = true;
       $('#viewerLeave').hidden = false;
       $('#viewerFullscreen').hidden = false;
+      $('#motionBox').hidden = false;
+      if (MOTION.enabled) startMotion();
       $('#viewerConnect').textContent = 'Start over';
       break;
 
@@ -730,6 +737,270 @@ function onViewerConnectionState() {
     default:
       break;
   }
+}
+
+/* ----------------------------- motion detection ---------------------------- */
+
+/*
+ * Everything below runs in the viewer's browser, on the frames that are already
+ * being decoded for the <video> element. Each sample is shrunk into a ~96px wide
+ * canvas, turned into luma and compared with the previous sample; the share of
+ * pixels that changed noticeably is the "motion score". No extra bytes travel
+ * over the network and the relay / broadcaster never learn that it is running.
+ */
+
+const MOTION_STORE_KEY = 'peercast.motion';
+
+const MOTION = {
+  enabled: false,
+  sensitivity: 5, // 1..10, persisted
+  sound: true, // persisted
+  raf: null,
+  lastSample: 0,
+  sampleMs: 200, // 5 samples a second: cheap enough for a phone in a corner
+  width: 96, // analysis width in pixels, height follows the aspect ratio
+  pixelDelta: 26, // per-pixel luma difference that counts as "changed"
+  score: 0, // smoothed share of changed pixels, in %
+  noise: 0, // slow floor: sensor grain, flickering light, auto-exposure
+  streak: 0,
+  alerts: 0,
+  lastAlert: 0,
+  cooldownMs: 6000, // one alert per 6s at most, so a busy scene is not a siren
+  canvas: null,
+  ctx: null,
+  prev: null,
+  audio: null,
+  flagTimer: null,
+};
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+/** Sensitivity 1..10 → share of changed pixels that counts as motion. */
+const motionThreshold = (sensitivity) => 12 * 0.72 ** (sensitivity - 1);
+
+function loadMotionSettings() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(MOTION_STORE_KEY) || 'null');
+  } catch {
+    saved = null;
+  }
+  if (!saved || typeof saved !== 'object') return;
+  MOTION.sensitivity = clamp(Math.round(Number(saved.sensitivity)) || 5, 1, 10);
+  MOTION.sound = saved.sound !== false;
+}
+
+function saveMotionSettings() {
+  try {
+    localStorage.setItem(
+      MOTION_STORE_KEY,
+      JSON.stringify({ sensitivity: MOTION.sensitivity, sound: MOTION.sound }),
+    );
+  } catch {
+    /* private mode — the settings just will not stick */
+  }
+}
+
+function syncMotionControls() {
+  $('#motionToggle').checked = MOTION.enabled;
+  $('#motionSound').checked = MOTION.sound;
+  $('#motionSensitivity').value = String(MOTION.sensitivity);
+  $('#motionSensValue').textContent = String(MOTION.sensitivity);
+}
+
+function startMotion() {
+  if (MOTION.raf) return;
+
+  if (!MOTION.canvas) {
+    MOTION.canvas = document.createElement('canvas');
+    MOTION.ctx = MOTION.canvas.getContext('2d', { willReadFrequently: true });
+  }
+
+  MOTION.prev = null;
+  MOTION.score = 0;
+  MOTION.noise = 0;
+  MOTION.streak = 0;
+  MOTION.lastSample = 0;
+  MOTION.raf = requestAnimationFrame(motionLoop);
+  setStatus($('#motionStatus'), 'Watching for movement — alerts stay on this device.', 'ok');
+}
+
+function stopMotion({ quiet = false } = {}) {
+  if (MOTION.raf) cancelAnimationFrame(MOTION.raf);
+  MOTION.raf = null;
+  MOTION.prev = null;
+  MOTION.score = 0;
+  MOTION.noise = 0;
+  MOTION.streak = 0;
+
+  clearTimeout(MOTION.flagTimer);
+  $('#motionFlag').hidden = true;
+  $('#viewerStage .video-wrap').classList.remove('motion-hit');
+  $('#motionFill').style.width = '0%';
+  $('#motionLevel').textContent = '0.0%';
+  $('#motionBox').dataset.hot = '0';
+  if (!quiet) setStatus($('#motionStatus'), 'Motion detection is off.', 'idle');
+}
+
+function setMotionEnabled(on) {
+  MOTION.enabled = Boolean(on);
+  syncMotionControls();
+
+  if (MOTION.enabled) {
+    primeAudio(); // the toggle click is a user gesture: unlock sound right away
+    startMotion();
+  } else {
+    stopMotion();
+  }
+}
+
+function motionLoop(now) {
+  if (!MOTION.enabled) {
+    MOTION.raf = null;
+    return;
+  }
+  MOTION.raf = requestAnimationFrame(motionLoop);
+
+  const video = $('#remoteVideo');
+  if (video.paused || video.readyState < 2 || !video.videoWidth) return;
+  if (now - MOTION.lastSample < MOTION.sampleMs) return;
+  MOTION.lastSample = now;
+
+  const instant = sampleMotion(video);
+
+  // The floor drifts slowly, so a noisy sensor or a shimmering lamp raises the
+  // bar instead of firing alerts all night — but only up to 3× the threshold.
+  MOTION.noise = MOTION.noise * 0.97 + instant * 0.03;
+  MOTION.score = MOTION.score * 0.55 + instant * 0.45;
+
+  const threshold = motionThreshold(MOTION.sensitivity);
+  const required = Math.min(Math.max(threshold, MOTION.noise * 2.2 + 0.15), threshold * 3);
+
+  MOTION.streak = instant >= required ? MOTION.streak + 1 : 0;
+  paintMotionMeter(instant, threshold);
+
+  // Two samples in a row (~400 ms) must be hot, so one noisy frame is not an alert.
+  if (MOTION.streak >= 2 && now - MOTION.lastAlert > MOTION.cooldownMs) {
+    MOTION.lastAlert = now;
+    MOTION.streak = 0;
+    fireMotionAlert();
+  }
+}
+
+/** Downscales the current frame to luma and returns the % of changed pixels. */
+function sampleMotion(video) {
+  const width = MOTION.width;
+  const height = Math.max(24, Math.round((video.videoHeight / video.videoWidth) * width));
+  const canvas = MOTION.canvas;
+
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+    MOTION.prev = null;
+  }
+
+  try {
+    MOTION.ctx.drawImage(video, 0, 0, width, height);
+  } catch {
+    return 0; // frame not decodable yet
+  }
+
+  const { data } = MOTION.ctx.getImageData(0, 0, width, height);
+  const total = width * height;
+  const luma = new Uint8Array(total);
+  for (let i = 0, p = 0; i < total; i += 1, p += 4) {
+    luma[i] = (data[p] * 77 + data[p + 1] * 150 + data[p + 2] * 29) >> 8;
+  }
+
+  const prev = MOTION.prev;
+  MOTION.prev = luma;
+  if (!prev || prev.length !== total) return 0;
+
+  let changed = 0;
+  for (let i = 0; i < total; i += 1) {
+    if (Math.abs(luma[i] - prev[i]) >= MOTION.pixelDelta) changed += 1;
+  }
+  return (changed / total) * 100;
+}
+
+function paintMotionMeter(instant, threshold) {
+  // The bar is relative: half full = at the alert threshold, full = 2× threshold.
+  const percent = clamp((instant / (threshold * 2)) * 100, 0, 100);
+  $('#motionFill').style.width = `${percent.toFixed(1)}%`;
+  $('#motionLevel').textContent = `${instant.toFixed(1)}%`;
+  $('#motionBox').dataset.hot = instant >= threshold ? '1' : '0';
+}
+
+function fireMotionAlert() {
+  MOTION.alerts += 1;
+  const time = new Date().toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const plural = MOTION.alerts === 1 ? '' : 's';
+  setStatus(
+    $('#motionStatus'),
+    `Motion at ${time} — ${MOTION.alerts} alert${plural} since you joined.`,
+    'warn',
+  );
+
+  $('#motionFlag').hidden = false;
+  const wrap = $('#viewerStage .video-wrap');
+  wrap.classList.add('motion-hit');
+  clearTimeout(MOTION.flagTimer);
+  MOTION.flagTimer = setTimeout(() => {
+    $('#motionFlag').hidden = true;
+    wrap.classList.remove('motion-hit');
+  }, 2600);
+
+  if (MOTION.sound) chime();
+  if (typeof navigator.vibrate === 'function') {
+    try {
+      navigator.vibrate([120, 90, 120]);
+    } catch {
+      /* vibration is a nicety, not a requirement */
+    }
+  }
+}
+
+function audioContext() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  if (!MOTION.audio) {
+    try {
+      MOTION.audio = new Ctx();
+    } catch {
+      return null;
+    }
+  }
+  if (MOTION.audio.state === 'suspended') MOTION.audio.resume().catch(() => {});
+  return MOTION.audio;
+}
+
+function primeAudio() {
+  audioContext();
+}
+
+/** Two short sine blips — no asset to download. */
+function chime() {
+  const ctx = audioContext();
+  if (!ctx) return;
+
+  const start = ctx.currentTime;
+  [880, 1180].forEach((frequency, index) => {
+    const at = start + index * 0.18;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = frequency;
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.exponentialRampToValueAtTime(0.25, at + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.16);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(at);
+    osc.stop(at + 0.2);
+  });
 }
 
 /* ---------------------------------- misc ----------------------------------- */
@@ -786,6 +1057,24 @@ $('#viewerConnect').addEventListener('click', viewerConnect);
 $('#viewerLeave').addEventListener('click', leaveStream);
 $('#viewerFullscreen').addEventListener('click', toggleFullscreen);
 
+/* ---- motion detection controls ---- */
+loadMotionSettings();
+syncMotionControls();
+
+$('#motionToggle').addEventListener('change', (event) => setMotionEnabled(event.currentTarget.checked));
+
+$('#motionSensitivity').addEventListener('input', (event) => {
+  MOTION.sensitivity = clamp(Math.round(Number(event.currentTarget.value)) || 5, 1, 10);
+  $('#motionSensValue').textContent = String(MOTION.sensitivity);
+  saveMotionSettings();
+});
+
+$('#motionSound').addEventListener('change', (event) => {
+  MOTION.sound = event.currentTarget.checked;
+  if (MOTION.sound) primeAudio();
+  saveMotionSettings();
+});
+
 document.addEventListener('keydown', (event) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName || '');
   if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -794,6 +1083,10 @@ document.addEventListener('keydown', (event) => {
       event.preventDefault();
       toggleFullscreen();
     }
+  }
+  if ((event.key === 'm' || event.key === 'M') && !$('#motionBox').hidden) {
+    event.preventDefault();
+    setMotionEnabled(!MOTION.enabled);
   }
   if (event.key === 'Escape' && inFullscreen()) {
     event.preventDefault();

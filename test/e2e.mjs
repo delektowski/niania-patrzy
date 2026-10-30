@@ -247,6 +247,81 @@ try {
   check('fullscreen can be entered and left again', fullscreen.entered && fullscreen.left,
     JSON.stringify(fullscreen));
 
+  // Motion detection: feed the <video> a synthetic picture so the check does not
+  // depend on whatever the fake camera happens to render.
+  check('motion panel shows up for a connected viewer', await evaluate(viewer,
+    `!document.querySelector('#motionBox').hidden`));
+
+  const motion = await evaluate(viewer, `(async () => {
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const video = document.querySelector('#remoteVideo');
+    const real = video.srcObject;
+    const status = document.querySelector('#motionStatus');
+    const toggle = document.querySelector('#motionToggle');
+
+    document.querySelector('#motionSound').click();           // keep the test silent
+    const slider = document.querySelector('#motionSensitivity');
+    slider.value = '8';
+    slider.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 320;
+    canvas.height = 180;
+    const ctx = canvas.getContext('2d');
+    const paint = (x) => {
+      ctx.fillStyle = '#101319';
+      ctx.fillRect(0, 0, 320, 180);
+      if (x >= 0) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(x, 60, 60, 60);
+      }
+    };
+
+    paint(-1);
+    video.srcObject = canvas.captureStream(12);
+    await video.play();
+    await wait(400);
+
+    toggle.click();
+    await wait(1600);                                        // steady picture
+    const quiet = { kind: status.dataset.kind, level: document.querySelector('#motionLevel').textContent };
+
+    let x = 0;
+    let flagSeen = false;
+    const painter = setInterval(() => {
+      x = (x + 40) % 300;
+      paint(x);
+    }, 100);
+    for (let i = 0; i < 45; i += 1) {
+      await wait(100);
+      if (!document.querySelector('#motionFlag').hidden) flagSeen = true;
+      if (flagSeen && status.dataset.kind === 'warn') break;
+    }
+    clearInterval(painter);
+
+    const result = {
+      enabled: toggle.checked && !document.querySelector('#motionBox').hidden,
+      quiet,
+      kind: status.dataset.kind,
+      text: status.textContent,
+      flag: flagSeen,
+      level: document.querySelector('#motionLevel').textContent,
+    };
+
+    toggle.click();                                           // back to off
+    video.srcObject = real;
+    await video.play().catch(() => {});
+    return result;
+  })()`, { userGesture: true });
+
+  check('motion detection switches on and samples frames', motion.enabled,
+    JSON.stringify(motion.quiet));
+  check('a steady picture raises no alert', motion.quiet.kind !== 'warn',
+    JSON.stringify(motion.quiet));
+  check('movement raises an alert', motion.kind === 'warn' && /Motion at/.test(motion.text),
+    `${motion.text} (${motion.level})`);
+  check('the alert is flagged on the video', motion.flag);
+
   await evaluate(host, `document.querySelector('#hostEnd').click()`);
   await sleep(1500);
   check('stopping the broadcast disconnects the viewer', await evaluate(viewer,

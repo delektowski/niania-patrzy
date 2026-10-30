@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PeerCast — one-to-one live streaming over WebRTC</title>
-    <link rel="stylesheet" href="styles.css?v=6" />
+    <link rel="stylesheet" href="styles.css?v=7" />
   </head>
   <body>
     <header class="topbar">
@@ -133,6 +133,7 @@
             <div class="video-wrap">
               <video id="remoteVideo" autoplay playsinline muted></video>
               <span class="video-hint" id="remoteHint">Waiting for the broadcaster…</span>
+              <span class="motion-flag" id="motionFlag" hidden>motion</span>
             </div>
 
             <div class="row">
@@ -142,6 +143,38 @@
             </div>
 
             <p class="status" id="viewerStatus" data-kind="idle">Enter the broadcaster's code to begin.</p>
+
+            <div class="motion" id="motionBox" hidden>
+              <div class="motion-head">
+                <label class="switch">
+                  <input type="checkbox" id="motionToggle" />
+                  <span class="track" aria-hidden="true"><span class="knob"></span></span>
+                  <span>Motion detection</span>
+                </label>
+                <output class="motion-level" id="motionLevel">0.0%</output>
+              </div>
+
+              <div class="motion-meter" aria-hidden="true"><i id="motionFill"></i></div>
+
+              <div class="row">
+                <label class="field">
+                  <span>Sensitivity <output id="motionSensValue">5</output>/10</span>
+                  <input id="motionSensitivity" type="range" min="1" max="10" step="1" value="5" />
+                </label>
+
+                <label class="switch sound-switch">
+                  <input type="checkbox" id="motionSound" checked />
+                  <span class="track" aria-hidden="true"><span class="knob"></span></span>
+                  <span>Alert sound</span>
+                </label>
+              </div>
+
+              <p class="status" id="motionStatus" data-kind="idle">Motion detection is off.</p>
+              <p class="hint">
+                Movement is detected here, on the frames this device already receives —
+                the broadcaster and the relay are not involved and no extra data is sent.
+              </p>
+            </div>
           </div>
 
           <div class="panel" id="viewerCodes">
@@ -184,6 +217,6 @@
     </footer>
 
     <noscript><p class="noscript">This app needs JavaScript and a WebRTC-capable browser.</p></noscript>
-    <script src="app.js?v=6"></script>
+    <script src="app.js?v=7"></script>
   </body>
 </html>

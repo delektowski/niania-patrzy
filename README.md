@@ -71,6 +71,44 @@ cloudflared tunnel --url http://localhost:8080     # or: ngrok http 8080
 4. The broadcaster presses **Accept viewer** — the stream starts.
 5. While watching, **⛶ Full screen** (or the `F` key) expands the stream and **⤡ Back to page**
    (or `Esc`) returns to the normal size.
+6. Optionally flip **Motion detection** (or press `M`) to be alerted when something moves
+   in the picture — see below.
+
+## Motion detection
+
+The viewer can be alerted when something moves in the stream. It runs **entirely in
+the viewer's browser**, on the frames that are already being decoded for the `<video>`
+element — so it works "just from the stream":
+
+- the relay knows nothing about it, and no extra bytes travel over the network
+- the broadcaster runs nothing extra (and cannot tell it is on)
+- nothing is uploaded, recorded or stored
+
+How it works, per sample (5× per second): the frame is shrunk into a 96-px-wide canvas,
+converted to luma and compared with the previous sample. The share of pixels that
+changed noticeably (`≥ 26` of 255 luma steps) is the *motion score*, shown as a
+percentage with a bar. An alert fires when the score clears the sensitivity threshold
+for **two samples in a row**, at most once every 6 seconds.
+
+- **Sensitivity 1–10** (`12% → 0.5%` of changed pixels): raise it for a small, distant
+  room, lower it for a busy street.
+- **Noise floor.** A slow moving average of the score follows sensor grain, a flickering
+  lamp or auto-exposure shifting, and raises the bar when the scene is already restless.
+- **The alert** is a pulsing `motion` badge on the picture, an amber status line with the
+  time and a count, a two-tone chime (Web Audio, no asset) and a short vibration on
+  phones. The sound can be switched off.
+- **Settings** (sensitivity, sound) are kept in `localStorage`.
+
+Limits worth knowing: it detects *pixel change*, not "a person" — a swinging curtain
+counts, a person sitting perfectly still does not. It needs the video to be playing, so a
+backgrounded tab (rAF throttling) or a locked phone pauses it, and a very dark room with a
+noisy sensor needs lower sensitivity.
+
+Want the detection on the **broadcaster** instead (so it keeps running when the viewer's
+screen is off)? The pieces are already there: sample `#localVideo`, and send the alert to
+the viewer over the existing `peercast-control` data channel — a few bytes, no media
+server. It only matters while a viewer is connected, which is why the viewer side is the
+default.
 
 ## Deploying at `https://niania.deldev.fyi/`
 
@@ -151,7 +189,8 @@ Notes:
 ```
 index.html             layout: role chooser, broadcaster panel, viewer panel
 styles.css             dark responsive theme, video framing, code display
-app.js                 capture, peer connection, relay calls, UI state machine
+app.js                 capture, peer connection, relay calls, UI state machine,
+                       client-side motion detection
 server/index.mjs       signaling relay: 10-char codes, /api, optional static serving
 deploy/Caddyfile       loopback-only HTTP server + /api reverse proxy
 deploy/docker-compose.yml  `peercast` (Caddy) + `peercast-api` (relay)
@@ -171,7 +210,9 @@ It starts the relay in static mode, launches headless Chrome with fake camera/mi
 devices, and drives a broadcaster tab and a viewer tab through the real handshake:
 6-digit code → viewer joins → broadcaster accepts → connected → video frames and
 audio track received → instant disconnect on hang-up, plus unknown-code handling,
-autoplay/mute behaviour and a fullscreen round trip. 19 checks, no npm installs.
+autoplay/mute behaviour, a fullscreen round trip and motion detection (a synthetic
+steady picture must stay quiet, a moving block must raise an alert). 24 checks, no npm
+installs.
 
 ## Notes and limits
 
@@ -190,6 +231,9 @@ autoplay/mute behaviour and a fullscreen round trip. 19 checks, no npm installs.
   corporate firewalls will need a TURN server — add it to `ICE_SERVERS` at the top of `app.js`.
 - **Screen audio** is only offered by some browsers (Chrome/Edge on desktop); the app
   falls back to video-only when the audio request is rejected.
+- **Motion detection is a pixel-difference heuristic**, computed in the viewer's browser
+  on the received frames: no ML, no cloud, no extra bandwidth — but also no notion of
+  "person", and it pauses while the tab is throttled in the background.
 - Video is sent as-is (browser default codecs, ~720p/30fps requested); there is no
   server-side transcoding or recording.
 - Codes are ~2–3 KB of text, so paste them rather than typing them by hand.
