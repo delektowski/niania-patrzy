@@ -1,0 +1,57 @@
+# Dedicated Caddy for PeerCast. Runs alongside the home-dashboard stack but
+# shares nothing with it: different container, different port, read-only mount.
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#   curl http://127.0.0.1:8088/
+#
+# Bound to loopback on purpose — cloudflared (a host service) reaches it at
+# http://localhost:8088 and the internet only ever gets there through the tunnel.
+
+name: peercast
+
+services:
+  peercast-caddy:
+    image: caddy:2-alpine
+    container_name: peercast
+    restart: unless-stopped
+    ports:
+      # loopback only; dual-stack so cloudflared works with either "localhost"
+      # resolution order (127.0.0.1) or an explicit IPv6 target.
+      - "127.0.0.1:8088:80"
+      - "[::1]:8088:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # the app itself; read-only, live edits on disk are served immediately
+      - ../:/srv/peercast:ro
+      - caddy_data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  peercast-api:
+    # Tiny zero-dependency signaling relay (node:http). Holds the WebRTC
+    # offer/answer for ~10 minutes so the codes stay 10 characters long.
+    image: node:22-alpine
+    container_name: peercast-api
+    restart: unless-stopped
+    command: ["node", "/app/server/index.mjs"]
+    environment:
+      PORT: "8080"
+      SESSION_TTL_MS: "600000"
+    volumes:
+      - ../server:/app/server:ro
+    expose:
+      - "8080"
+    # no published ports: only Caddy (same compose network) can reach it
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  caddy_data:

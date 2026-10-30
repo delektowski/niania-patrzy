@@ -1,0 +1,52 @@
+# PeerCast — own web server, independent from the home-dashboard stack.
+#
+# Served at:  https://niania.deldev.fyi/
+#
+# The Cloudflare Tunnel (token-managed in Zero Trust) forwards the whole
+# hostname to http://127.0.0.1:8088; TLS is terminated by Cloudflare at the
+# edge. The port is published on loopback only, so the app cannot be reached
+# except through the tunnel.
+{
+	# admin stays on localhost:2019 inside the container (not published), so
+	# `docker exec peercast caddy reload --config /etc/caddy/Caddyfile` works.
+	auto_https off
+}
+
+:80 {
+	root * /srv/peercast
+	encode zstd gzip
+
+	# request log — useful to see whether tunnel traffic reaches the origin
+	log {
+		output stdout
+		format console
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	# Signaling relay: parks the WebRTC offer/answer for ~10 minutes so the
+	# humans only trade a 10-character code. Media never passes through here.
+	handle /api/* {
+		header Cache-Control "no-store"
+		reverse_proxy peercast-api:8080
+	}
+
+	# Optional alias, kept so the app still works if the tunnel is ever mapped
+	# to a sub-path instead of this dedicated hostname.
+	@bareNiania path /niania
+	redir @bareNiania /niania/ 308
+
+	handle_path /niania/* {
+		header Cache-Control "no-cache"
+		file_server
+	}
+
+	handle {
+		header Cache-Control "no-cache"
+		file_server
+	}
+}

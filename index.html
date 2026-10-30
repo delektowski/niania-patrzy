@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PeerCast — one-to-one live streaming over WebRTC</title>
+    <link rel="stylesheet" href="styles.css?v=6" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="dot"></span>PeerCast</div>
+    </header>
+
+    <main>
+      <!-- ============ choose a role ============ -->
+      <section class="view active" id="view-choose">
+        <h1>Stream from one device,<br /><span>watch on another.</span></h1>
+        <p class="lede">
+          One live subscription, one viewer. A six-digit code pairs the two devices;
+          audio and video go straight from device to device.
+        </p>
+
+        <div class="cards">
+          <button class="card" id="pickHost" type="button">
+            <span class="icon" aria-hidden="true">📡</span>
+            <h2>Stream this device</h2>
+            <p>Share your camera, microphone or screen and open the subscription for one viewer.</p>
+            <span class="go">Start streaming →</span>
+          </button>
+
+          <button class="card" id="pickViewer" type="button">
+            <span class="icon" aria-hidden="true">🎧</span>
+            <h2>Watch a stream</h2>
+            <p>Join a stream opened on another device with the code its owner sent you.</p>
+            <span class="go">Join a stream →</span>
+          </button>
+        </div>
+
+        <ol class="steps">
+          <li><span><b>Broadcaster</b> starts the stream and gets a <i>6-digit code</i>.</span></li>
+          <li><span><b>Viewer</b> types that code — no reply code to send back.</span></li>
+          <li><span><b>Broadcaster</b> accepts the viewer and video + sound start flowing device → device.</span></li>
+        </ol>
+      </section>
+
+      <!-- ============ broadcaster ============ -->
+      <section class="view" id="view-host">
+        <div class="panel-head">
+          <button class="ghost" type="button" data-back>← Back</button>
+          <h2>Broadcast</h2>
+          <span class="badge" id="hostBadge" data-kind="idle">idle</span>
+        </div>
+
+        <div class="grid">
+          <div class="panel">
+            <div class="video-wrap">
+              <video id="localVideo" autoplay playsinline muted></video>
+              <span class="video-hint" id="localHint">Preview appears here</span>
+            </div>
+
+            <div class="row">
+              <label class="field">
+                <span>Source</span>
+                <select id="source">
+                  <option value="camera-mic">Camera + microphone</option>
+                  <option value="camera">Camera only</option>
+                  <option value="screen">Screen (with audio if supported)</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>Stream name</span>
+                <input id="channelName" type="text" maxlength="40" placeholder="Living room cam" />
+              </label>
+            </div>
+
+            <div class="row">
+              <button class="primary" type="button" id="hostStart">Start broadcast</button>
+              <button class="ghost" type="button" id="hostStop" hidden>Stop</button>
+            </div>
+
+            <p class="status" id="hostStatus" data-kind="idle">Not streaming.</p>
+          </div>
+
+          <!-- step 1 + 2 -->
+          <div class="panel" id="hostSteps" hidden>
+            <h3>1. Send this code to the viewer</h3>
+            <output id="hostCode" class="code" aria-live="polite">••••••</output>
+            <div class="row">
+              <button class="ghost" type="button" id="copyOffer">Copy code</button>
+              <button class="ghost" type="button" id="shareOffer" hidden>Share code…</button>
+            </div>
+            <p class="hint">
+              Six digits, no letters. The code works for 10 minutes, for one viewer,
+              and only until you accept them.
+            </p>
+
+            <h3>2. Accept the viewer</h3>
+            <p class="status" id="hostWait" data-kind="busy">Waiting for a viewer to enter the code…</p>
+            <div class="row">
+              <button class="primary" type="button" id="hostConnect" disabled>Accept viewer</button>
+            </div>
+            <p class="hint">
+              Their reply comes back through the relay by itself — nothing to paste.
+            </p>
+          </div>
+
+          <!-- live -->
+          <div class="panel live-panel" id="hostLive" hidden>
+            <h3>You are live</h3>
+            <p class="live-title" id="hostLiveTitle">Live stream</p>
+            <ul class="facts">
+              <li><span>Viewers</span><b>1 of 1</b></li>
+              <li><span>Transport</span><b>WebRTC (DTLS-SRTP)</b></li>
+              <li><span>Route</span><b>device → device</b></li>
+            </ul>
+            <p class="hint">Stopping the broadcast ends the subscription for everyone.</p>
+            <button class="danger" type="button" id="hostEnd">End broadcast</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ viewer ============ -->
+      <section class="view" id="view-viewer">
+        <div class="panel-head">
+          <button class="ghost" type="button" data-back>← Back</button>
+          <h2 id="joinTitle">Watch a stream</h2>
+          <span class="badge" id="viewerBadge" data-kind="idle">idle</span>
+        </div>
+
+        <div class="grid">
+          <div class="panel" id="viewerStage">
+            <div class="video-wrap">
+              <video id="remoteVideo" autoplay playsinline muted></video>
+              <span class="video-hint" id="remoteHint">Waiting for the broadcaster…</span>
+            </div>
+
+            <div class="row">
+              <button class="ghost" type="button" id="enableSound" hidden>🔊 Enable sound</button>
+              <button class="ghost" type="button" id="viewerFullscreen" hidden>⛶ Full screen</button>
+              <button class="ghost" type="button" id="viewerLeave" hidden>Disconnect</button>
+            </div>
+
+            <p class="status" id="viewerStatus" data-kind="idle">Enter the broadcaster's code to begin.</p>
+          </div>
+
+          <div class="panel" id="viewerCodes">
+            <div id="viewerInput">
+              <h3>1. Enter the broadcaster's code</h3>
+              <input
+                id="codeIn"
+                class="code-input"
+                type="text"
+                maxlength="6"
+                inputmode="numeric"
+                pattern="[0-9]*"
+                autocomplete="one-time-code"
+                placeholder="482913"
+                spellcheck="false"
+              />
+              <div class="row">
+                <button class="primary" type="button" id="viewerConnect">Join stream</button>
+              </div>
+            </div>
+
+            <div id="viewerReply" hidden>
+              <h3>2. Wait for the broadcaster</h3>
+              <p class="hint">
+                Your reply was sent automatically. The stream starts as soon as the
+                broadcaster accepts you.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        Works over HTTPS or on <code>localhost</code>. A tiny relay holds the WebRTC handshake for
+        a few minutes; the media is peer-to-peer. Both devices need a network path to each other —
+        public STUN is used, symmetric NATs would require a TURN server.
+      </p>
+    </footer>
+
+    <noscript><p class="noscript">This app needs JavaScript and a WebRTC-capable browser.</p></noscript>
+    <script src="app.js?v=6"></script>
+  </body>
+</html>
